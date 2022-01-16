@@ -405,12 +405,18 @@ public:
     memset(vec.get(), 0, (size + 7) / 8);
   }
 
+  bool empty() const { return !vec; }
+
+  void reset(i64 size) {
+    memset(vec.get(), 0, (size + 7) / 8);
+  }
+
   BitRef operator[](i64 i) {
     return BitRef(vec[i / 8], i % 8);
   }
 
 private:
-  std::unique_ptr<u8[]> vec;
+  std::unique_ptr<u8[]> vec = nullptr;
 };
 
 //

@@ -652,6 +652,9 @@ static int elf_main(int argc, char **argv) {
   // Assign offsets to output sections
   i64 filesize = set_osec_offsets(ctx);
 
+  if constexpr (E::e_machine == EM_AARCH64)
+    filesize = create_range_extension_thunks(ctx);
+
   // Fix linker-synthesized symbol addresses.
   fix_synthetic_symbols(ctx);
 
@@ -696,6 +699,9 @@ static int elf_main(int argc, char **argv) {
 
       chunk->copy_buf(ctx);
     });
+
+    if constexpr (E::e_machine == EM_AARCH64)
+      write_thunks(ctx);
 
     ctx.checkpoint();
   }

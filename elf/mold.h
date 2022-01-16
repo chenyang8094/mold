@@ -226,6 +226,32 @@ struct FdeRecord {
   std::atomic_bool is_alive = true;
 };
 
+template <typename E>
+class RangeExtensionThunk {};
+
+template <>
+class RangeExtensionThunk<ARM64> {
+public:
+  RangeExtensionThunk(OutputSection<ARM64> &osec)
+    : output_section(osec) {}
+
+  u64 get_addr(Symbol<ARM64> &sym, i64 idx) const;
+  void copy_buf(Context<ARM64> &ctx);
+
+  static constexpr i64 ENTRY_SIZE = 12;
+
+  OutputSection<ARM64> &output_section;
+  std::span<InputSection<ARM64> *> input_sections;
+  u16 thunk_idx = -1;
+  i64 offset = -1;
+  std::vector<Symbol<ARM64> *> symbols;
+};
+
+struct RangeExtensionRef {
+  u16 thunk_idx = -1;
+  u16 sym_idx = -1;
+};
+
 // InputSection represents a section in an input object file.
 template <typename E>
 class InputSection {
@@ -283,6 +309,10 @@ public:
   bool icf_leaf = false;
 
   bool is_ehframe = false;
+
+  // For range extension thunks
+  BitVector needs_range_extn;
+  std::vector<RangeExtensionRef> range_extn;
 
 private:
   typedef enum : u8 { NONE, ERROR, COPYREL, PLT, DYNREL, BASEREL } Action;
@@ -403,6 +433,8 @@ public:
 
   void construct_relr(Context<E> &ctx);
   std::vector<typename E::WordTy> relr;
+
+  std::vector<RangeExtensionThunk<E>> thunks;
 
 private:
   OutputSection(std::string_view name, u32 type, u64 flags, u32 idx);
@@ -1153,6 +1185,13 @@ template <typename E> void fix_synthetic_symbols(Context<E> &);
 template <typename E> void compress_debug_sections(Context<E> &);
 
 //
+// arch-arm64.cc
+//
+
+i64 create_range_extension_thunks(Context<ARM64> &ctx);
+void write_thunks(Context<ARM64> &ctx);
+
+//
 // output-file.cc
 //
 
@@ -1495,6 +1534,7 @@ enum {
   NEEDS_TLSLD    = 1 << 4,
   NEEDS_COPYREL  = 1 << 5,
   NEEDS_TLSDESC  = 1 << 6,
+  NEEDS_THUNK    = 1 << 7,
 };
 
 // Symbol class represents a defined symbol.
@@ -1508,6 +1548,8 @@ public:
   Symbol() = default;
   Symbol(std::string_view name) : nameptr(name.data()), namelen(name.size()) {}
   Symbol(const Symbol<E> &other) : Symbol(other.name()) {}
+
+  bool operator<(const Symbol &other) const;
 
   u64 get_addr(Context<E> &ctx, bool allow_plt = true) const;
   u64 get_got_addr(Context<E> &ctx) const;
@@ -1565,6 +1607,10 @@ public:
   i32 aux_idx = -1;
   u16 shndx = 0;
   u16 ver_idx = 0;
+
+  // For range extension thunks
+  u16 thunk_idx = -1;
+  u16 thunk_sym_idx = -1;
 
   // `flags` has NEEDS_ flags.
   std::atomic_uint8_t flags = 0;
@@ -1753,6 +1799,19 @@ bool InputSection<E>::is_relr_reloc(Context<E> &ctx, const ElfRel<E> &rel) {
          (rel.r_offset % E::word_size) == 0;
 }
 
+inline u64
+RangeExtensionThunk<ARM64>::get_addr(Symbol<ARM64> &sym, i64 idx) const {
+  if (idx == UINT16_MAX) {
+    for (i64 i = 0; i < symbols.size(); i++)
+      if (symbols[i] == &sym)
+        return output_section.shdr.sh_addr + offset + i * ENTRY_SIZE;
+    unreachable();
+  }
+
+  assert(symbols[idx] == &sym);
+  return output_section.shdr.sh_addr + offset + idx * ENTRY_SIZE;
+}
+
 template <typename E>
 template <typename T>
 inline std::span<T> InputFile<E>::get_data(Context<E> &ctx, const ElfShdr<E> &shdr) {
@@ -1807,6 +1866,14 @@ inline i64 ObjectFile<E>::get_shndx(const ElfSym<E> &esym) {
 template <typename E>
 inline InputSection<E> *ObjectFile<E>::get_section(const ElfSym<E> &esym) {
   return sections[get_shndx(esym)].get();
+}
+
+// This operator defines a total order over symbols. This is used to
+// make the output deterministic.
+template <typename E>
+inline bool Symbol<E>::operator<(const Symbol &other) const {
+  return std::tuple{file->priority, sym_idx} <
+         std::tuple{other.file->priority, other.sym_idx};
 }
 
 template <typename E>
